@@ -16,6 +16,8 @@ public class ImageMatcher {
     public ImageMatcher(String imagePath, int tolerance, int stride) {
         try {
             this.targetImage = ImageIO.read(new File(imagePath));
+            System.out.println("ImageMatcher: loaded target image '" + imagePath + "' size="
+                    + targetImage.getWidth() + "x" + targetImage.getHeight());
         } catch (IOException e) {
             throw new RuntimeException("Failed to load target image", e);
         }
