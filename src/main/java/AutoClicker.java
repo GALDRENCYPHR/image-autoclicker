@@ -1,6 +1,7 @@
 import javax.swing.*;
 import java.awt.*;
 import java.awt.event.*;
+import java.awt.image.*;
 import java.awt.image.BufferedImage;
 import java.io.File;
 
@@ -59,18 +60,13 @@ public class AutoClicker {
                         int percentChanged = computeChangePercent(prevShot, shot, 4);
                         if (percentChanged >= changeThresholdPercent) {
                             System.out.println("Major change detected: " + percentChanged + "% >= " + changeThresholdPercent + "%");
-                            // For change-trigger mode we skip ImageMatcher lookup and click the center of the monitor region (plus offsets).
-                            int centerX, centerY;
-                            if (monitorRegion != null) {
-                                centerX = monitorRegion.x + monitorRegion.width / 2 + clickOffsetX;
-                                centerY = monitorRegion.y + monitorRegion.height / 2 + clickOffsetY;
-                            } else {
-                                Dimension s = Toolkit.getDefaultToolkit().getScreenSize();
-                                centerX = s.width / 2 + clickOffsetX;
-                                centerY = s.height / 2 + clickOffsetY;
-                            }
-                            System.out.println("Change-trigger: clicking at (" + centerX + "," + centerY + ")");
-                            attemptClickWithVerify(centerX, centerY);
+                            // For change-trigger mode, click at monitor region top-left + offset fields
+                            int baseX = (monitorRegion == null) ? 0 : monitorRegion.x;
+                            int baseY = (monitorRegion == null) ? 0 : monitorRegion.y;
+                            int targetX = baseX + clickOffsetX;
+                            int targetY = baseY + clickOffsetY;
+                            System.out.println("Change-trigger: clicking at (" + targetX + "," + targetY + ")");
+                            attemptClickWithVerify(targetX, targetY);
                             prevShot = shot;
                             Thread.sleep(scanIntervalMs);
                             continue;
@@ -99,8 +95,8 @@ public class AutoClicker {
                 } catch (InterruptedException e) {
                     Thread.currentThread().interrupt();
                     stop();
-                } catch (Exception ex) {
-                    ex.printStackTrace();
+                } catch (HeadlessException | RasterFormatException ex) {
+                    System.err.println("Error while taking screenshot: " + ex.getMessage());
                 }
             }
         }, "AutoClicker-Worker");
@@ -191,9 +187,12 @@ public class AutoClicker {
 
     private static class ControlUI {
         private final JFrame frame = new JFrame("AutoClicker Control");
+        private final JWindow crosshairOverlay;
         private final JTextField imagePathField = new JTextField(30);
         private final JTextField tolField = new JTextField("30", 5);
         private final JTextField strideField = new JTextField("2", 5);
+        private final Timer crosshairTimer;
+        private volatile boolean trackingMouse = false;
         private final JTextField offsetXField = new JTextField("0", 5);
         private final JTextField offsetYField = new JTextField("0", 5);
         private final JTextField intervalField = new JTextField("3000", 7);
@@ -204,9 +203,12 @@ public class AutoClicker {
         private final JButton useMousePosBtn = new JButton("Use Mouse Pos");
         private final JButton pickRegionBtn = new JButton("Pick Region");
 
-        private final JButton startBtn = new JButton("Start");
-        private final JButton stopBtn = new JButton("Stop");
-        private final JButton testClickBtn = new JButton("Test Click");
+    private final JButton startBtn = new JButton("Start");
+    private final JButton stopBtn = new JButton("Stop");
+    private final JButton testClickBtn = new JButton("Test Click");
+    private final JButton lockPositionBtn = new JButton("Lock Position");
+    private final JButton pickClickPosBtn = new JButton("Pick Click Position");
+    private boolean pickingClickPos = false;
         private AutoClicker currentClicker = null;
 
         private final JPanel previewPanel;
@@ -218,6 +220,36 @@ public class AutoClicker {
         private final JTextField changeThresholdField = new JTextField("5", 5);
 
         ControlUI() {
+            // Create crosshair overlay (always-on-top, transparent window)
+            crosshairOverlay = new JWindow();
+            crosshairOverlay.setBackground(new Color(0, 0, 0, 0));
+            crosshairOverlay.setSize(50, 50);
+            JPanel crosshairPanel = new JPanel() {
+                @Override
+                protected void paintComponent(Graphics g) {
+                    super.paintComponent(g);
+                    setBackground(new Color(0, 0, 0, 0));
+                    Graphics2D g2 = (Graphics2D) g.create();
+                    g2.setColor(new Color(255, 0, 0, 180));
+                    g2.setStroke(new BasicStroke(2));
+                    int cx = getWidth() / 2;
+                    int cy = getHeight() / 2;
+                    g2.drawLine(cx - 10, cy, cx + 10, cy);
+                    g2.drawLine(cx, cy - 10, cx, cy + 10);
+                    g2.dispose();
+                }
+            };
+            crosshairPanel.setOpaque(false);
+            crosshairOverlay.add(crosshairPanel);
+
+            // Timer to update crosshair position
+            crosshairTimer = new Timer(16, e -> {
+                if (trackingMouse) {
+                    Point p = MouseInfo.getPointerInfo().getLocation();
+                    crosshairOverlay.setLocation(p.x - 25, p.y - 25);
+                }
+            });
+
             JPanel controls = new JPanel(new GridBagLayout());
             GridBagConstraints c = new GridBagConstraints();
             c.insets = new Insets(4, 4, 4, 4);
@@ -255,6 +287,8 @@ public class AutoClicker {
             btnRow.add(startBtn);
             btnRow.add(stopBtn);
             btnRow.add(testClickBtn);
+            btnRow.add(lockPositionBtn);
+            btnRow.add(pickClickPosBtn);
             c.gridx = 0; c.gridy = 6; c.gridwidth = 6;
             controls.add(btnRow, c);
 
@@ -266,11 +300,24 @@ public class AutoClicker {
             stopBtn.setEnabled(false);
 
             browse.addActionListener(e -> onBrowse());
-            startBtn.addActionListener(this::onStart);
-            stopBtn.addActionListener(this::onStop);
+            startBtn.addActionListener(e -> onStart());
+            stopBtn.addActionListener(e -> onStop());
             useMousePosBtn.addActionListener(e -> onUseMousePos());
             pickRegionBtn.addActionListener(e -> onPickRegion());
             testClickBtn.addActionListener(e -> onTestClick());
+            JButton lockPositionBtn = new JButton("Lock Position");
+            lockPositionBtn.addActionListener(e -> {
+                if (!trackingMouse) {
+                    // Start tracking
+                    trackingMouse = true;
+                    crosshairOverlay.setVisible(true);
+                    crosshairTimer.start();
+                    lockPositionBtn.setText("Lock");
+                } else {
+                    onLockPosition();
+                    lockPositionBtn.setText("Lock Position");
+                }
+            });
 
             previewPanel = new JPanel() {
                 @Override
@@ -284,9 +331,18 @@ public class AutoClicker {
                         g.setColor(Color.LIGHT_GRAY);
                         g.drawString("Preview (500x500)", 10, 20);
                     }
-                    g.setColor(Color.RED);
-                    g.drawLine(getWidth() / 2 - 10, getHeight() / 2, getWidth() / 2 + 10, getHeight() / 2);
-                    g.drawLine(getWidth() / 2, getHeight() / 2 - 10, getWidth() / 2, getHeight() / 2 + 10);
+                    // Draw crosshair at the current click offset
+                    try {
+                        int ox = Integer.parseInt(offsetXField.getText().trim());
+                        int oy = Integer.parseInt(offsetYField.getText().trim());
+                        double sx = previewImage != null ? (double) previewPanel.getWidth() / previewImage.getWidth() : 1.0;
+                        double sy = previewImage != null ? (double) previewPanel.getHeight() / previewImage.getHeight() : 1.0;
+                        int px = (int) (ox * sx);
+                        int py = (int) (oy * sy);
+                        g.setColor(Color.RED);
+                        g.drawLine(px - 10, py, px + 10, py);
+                        g.drawLine(px, py - 10, px, py + 10);
+                    } catch (NumberFormatException ignore) {}
                 }
             };
             previewPanel.setPreferredSize(new Dimension(500, 500));
@@ -294,6 +350,7 @@ public class AutoClicker {
             previewPanel.addMouseListener(new MouseAdapter() {
                 @Override
                 public void mouseClicked(MouseEvent e) {
+                    if (!pickingClickPos) return;
                     if (previewImage == null) return;
                     double sx = (double) previewImage.getWidth() / previewPanel.getWidth();
                     double sy = (double) previewImage.getHeight() / previewPanel.getHeight();
@@ -301,6 +358,30 @@ public class AutoClicker {
                     int imgY = (int) (e.getY() * sy);
                     offsetXField.setText(String.valueOf(imgX));
                     offsetYField.setText(String.valueOf(imgY));
+                    pickingClickPos = false;
+                    pickClickPosBtn.setText("Pick Click Position");
+                    previewPanel.setCursor(Cursor.getDefaultCursor());
+                    previewPanel.repaint();
+                }
+            });
+            previewPanel.addMouseMotionListener(new MouseMotionAdapter() {
+                @Override
+                public void mouseMoved(MouseEvent e) {
+                    if (pickingClickPos && previewImage != null) {
+                        previewPanel.setCursor(Cursor.getPredefinedCursor(Cursor.CROSSHAIR_CURSOR));
+                    } else {
+                        previewPanel.setCursor(Cursor.getDefaultCursor());
+                    }
+                }
+            });
+            pickClickPosBtn.addActionListener(e -> {
+                pickingClickPos = !pickingClickPos;
+                if (pickingClickPos) {
+                    pickClickPosBtn.setText("Click in Preview");
+                    previewPanel.setCursor(Cursor.getPredefinedCursor(Cursor.CROSSHAIR_CURSOR));
+                } else {
+                    pickClickPosBtn.setText("Pick Click Position");
+                    previewPanel.setCursor(Cursor.getDefaultCursor());
                 }
             });
 
@@ -324,6 +405,26 @@ public class AutoClicker {
                 File f = chooser.getSelectedFile();
                 imagePathField.setText(f.getAbsolutePath());
             }
+        }
+
+        private void onLockPosition() {
+            // This method is called directly from the lambda
+            Point p = MouseInfo.getPointerInfo().getLocation();
+            if (useMonitorCheck.isSelected()) {
+                // Convert to monitor-relative coordinates
+                int mx = parseIntOr(monitorXField.getText().trim(), 0);
+                int my = parseIntOr(monitorYField.getText().trim(), 0);
+                offsetXField.setText(String.valueOf(p.x - mx));
+                offsetYField.setText(String.valueOf(p.y - my));
+            } else {
+                // Use absolute coordinates
+                offsetXField.setText(String.valueOf(p.x));
+                offsetYField.setText(String.valueOf(p.y));
+            }
+            trackingMouse = false;
+            crosshairOverlay.setVisible(false);
+            crosshairTimer.stop();
+            refreshPreview();
         }
 
         private void onUseMousePos() {
@@ -405,33 +506,33 @@ public class AutoClicker {
                 previewPanel.repaint();
                 return;
             }
-            int mx = parseIntOr("monitorX", monitorXField.getText().trim(), 0);
-            int my = parseIntOr("monitorY", monitorYField.getText().trim(), 0);
+            int mx = parseIntOr(monitorXField.getText().trim(), 0);
+            int my = parseIntOr(monitorYField.getText().trim(), 0);
             Rectangle r = new Rectangle(mx, my, 500, 500);
             BufferedImage shot = previewScanner.takeScreenshot(r);
             if (shot != null) previewImage = shot;
             previewPanel.repaint();
         }
 
-        private void onStart(ActionEvent ev) {
+        private void onStart() {
             String path = imagePathField.getText().trim();
             // image path is optional; leave empty for change-detection-only mode
             if (path.isEmpty()) path = null;
-            int tol = parseIntOr("tol", tolField.getText().trim(), 30);
-            int stride = parseIntOr("stride", strideField.getText().trim(), 2);
-            int ox = parseIntOr("ox", offsetXField.getText().trim(), 0);
-            int oy = parseIntOr("oy", offsetYField.getText().trim(), 0);
-            long interval = parseLongOr("interval", intervalField.getText().trim(), 3000);
+            int tol = parseIntOr(tolField.getText().trim(), 30);
+            int stride = parseIntOr(strideField.getText().trim(), 2);
+            int ox = parseIntOr(offsetXField.getText().trim(), 0);
+            int oy = parseIntOr(offsetYField.getText().trim(), 0);
+            long interval = parseLongOr(intervalField.getText().trim(), 3000);
 
             Rectangle monitor = null;
             if (useMonitorCheck.isSelected()) {
-                int mx = parseIntOr("monitorX", monitorXField.getText().trim(), 0);
-                int my = parseIntOr("monitorY", monitorYField.getText().trim(), 0);
+                int mx = parseIntOr(monitorXField.getText().trim(), 0);
+                int my = parseIntOr(monitorYField.getText().trim(), 0);
                 monitor = new Rectangle(mx, my, 500, 500);
             }
 
             boolean detectOnPixelChange = detectChangeCheck.isSelected();
-            int changeThresholdPercent = parseIntOr("changeThreshold", changeThresholdField.getText().trim(), 5);
+            int changeThresholdPercent = parseIntOr(changeThresholdField.getText().trim(), 5);
 
             try {
                 currentClicker = new AutoClicker(path, tol, stride, ox, oy, interval, monitor, detectOnPixelChange, changeThresholdPercent);
@@ -458,7 +559,7 @@ public class AutoClicker {
             changeThresholdField.setEnabled(false);
         }
 
-        private void onStop(ActionEvent ev) {
+        private void onStop() {
             if (currentClicker != null) {
                 currentClicker.stop();
                 currentClicker = null;
@@ -481,12 +582,12 @@ public class AutoClicker {
 
         private void onTestClick() {
             try {
-                int ox = parseIntOr("ox", offsetXField.getText().trim(), 0);
-                int oy = parseIntOr("oy", offsetYField.getText().trim(), 0);
+                int ox = parseIntOr(offsetXField.getText().trim(), 0);
+                int oy = parseIntOr(offsetYField.getText().trim(), 0);
                 Rectangle monitor = null;
                 if (useMonitorCheck.isSelected()) {
-                    int mx = parseIntOr("monitorX", monitorXField.getText().trim(), 0);
-                    int my = parseIntOr("monitorY", monitorYField.getText().trim(), 0);
+                    int mx = parseIntOr(monitorXField.getText().trim(), 0);
+                    int my = parseIntOr(monitorYField.getText().trim(), 0);
                     monitor = new Rectangle(mx, my, 500, 500);
                 }
 
@@ -503,17 +604,18 @@ public class AutoClicker {
                     testMouse.click(targetX, targetY);
                     JOptionPane.showMessageDialog(frame, "Test click performed.", "Done", JOptionPane.INFORMATION_MESSAGE);
                 }
-            } catch (Exception ex) {
-                ex.printStackTrace();
-                JOptionPane.showMessageDialog(frame, "Test click failed: " + ex.getMessage(), "Error", JOptionPane.ERROR_MESSAGE);
+            } catch (HeadlessException e) {
+                JOptionPane.showMessageDialog(frame, "Test click failed: Device has no mouse or display", "Error", JOptionPane.ERROR_MESSAGE);
             }
         }
 
-        private int parseIntOr(String ctx, String txt, int def) {
-            try { return Integer.parseInt(txt); } catch (Exception e) { return def; }
+        private int parseIntOr(String txt, int def) {
+            try { return Integer.parseInt(txt); }
+            catch (NumberFormatException e) { return def; }
         }
-        private long parseLongOr(String ctx, String txt, long def) {
-            try { return Long.parseLong(txt); } catch (Exception e) { return def; }
+        private long parseLongOr(String txt, long def) {
+            try { return Long.parseLong(txt); }
+            catch (NumberFormatException e) { return def; }
         }
 
         void show() {
@@ -545,9 +647,9 @@ public class AutoClicker {
     }
 
     private static int parseIntArg(String s, int def) {
-        try { return Integer.parseInt(s); } catch (Exception e) { return def; }
+        try { return Integer.parseInt(s); } catch (NumberFormatException e) { return def; }
     }
     private static long parseLongArg(String s, long def) {
-        try { return Long.parseLong(s); } catch (Exception e) { return def; }
+        try { return Long.parseLong(s); } catch (NumberFormatException e) { return def; }
     }
 }
