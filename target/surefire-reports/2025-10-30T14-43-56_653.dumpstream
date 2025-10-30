@@ -1,0 +1,5 @@
+# Created at 2025-10-30T14:43:58.270
+Boot Manifest-JAR contains absolute paths in classpath 'E:\Documents\Auto click\image-autoclicker\target\test-classes'
+Hint: <argLine>-Djdk.net.URLClassPath.disableClassPathURLCheck=true</argLine>
+'other' has different root
+
