@@ -24,8 +24,10 @@ public class ImageMatcher {
     }
 
     public Rectangle findMatch(BufferedImage screenshot) {
+        if (screenshot == null) return null;
         int maxX = screenshot.getWidth() - targetImage.getWidth();
         int maxY = screenshot.getHeight() - targetImage.getHeight();
+        if (maxX < 0 || maxY < 0) return null; // template larger than screenshot
 
         for (int x = 0; x <= maxX; x += stride) {
             for (int y = 0; y <= maxY; y += stride) {
@@ -41,21 +43,29 @@ public class ImageMatcher {
         int tw = targetImage.getWidth();
         int th = targetImage.getHeight();
 
-        // quick early-check: sample a few pixels first
+        // quick early-check: sample a few pixels first (skip fully transparent template pixels)
         int samplesX = Math.max(1, tw / 4);
         int samplesY = Math.max(1, th / 4);
         for (int sx = 0; sx < tw; sx += samplesX) {
             for (int sy = 0; sy < th; sy += samplesY) {
-                if (!pixelsClose(targetImage.getRGB(sx, sy), screen.getRGB(startX + sx, startY + sy))) {
+                int trgb = targetImage.getRGB(sx, sy);
+                int alpha = (trgb >> 24) & 0xFF;
+                if (alpha == 0) continue; // ignore transparent parts of template
+                int sRgb = screen.getRGB(startX + sx, startY + sy);
+                if (!pixelsClose(trgb, sRgb)) {
                     return false;
                 }
             }
         }
 
-        // full check
+        // full check (skip transparent template pixels)
         for (int x = 0; x < tw; x++) {
             for (int y = 0; y < th; y++) {
-                if (!pixelsClose(targetImage.getRGB(x, y), screen.getRGB(startX + x, startY + y))) {
+                int trgb = targetImage.getRGB(x, y);
+                int alpha = (trgb >> 24) & 0xFF;
+                if (alpha == 0) continue;
+                int sRgb = screen.getRGB(startX + x, startY + y);
+                if (!pixelsClose(trgb, sRgb)) {
                     return false;
                 }
             }
